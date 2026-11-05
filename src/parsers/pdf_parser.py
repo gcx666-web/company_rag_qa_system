@@ -49,6 +49,8 @@ class PdfParser(BaseParser):
         
         #提取内容
         raw_text=doc.document.export_to_markdown()
+        #分块
+        chunks=self.chunker.chunk_text(raw_text)
         
         #提取表格
         tables=self._extract_tables(doc)
@@ -56,9 +58,9 @@ class PdfParser(BaseParser):
         return ParseResult(
             file_name=Path(file_path).name,
             total_pages=len(doc.document.pages),
-            total_chunks=len(raw_text),
+            total_chunks=len(chunks),
             table_count=len(tables),
-            chunks=[],
+            chunks=chunks,
             raw_text=raw_text,
             tables=tables,
             metadata={
@@ -78,15 +80,16 @@ class PdfParser(BaseParser):
         doc = self.converter.convert(source)
         #提取内容
         raw_text=doc.document.export_to_markdown()
-                
-         #提取表格
+        #分块
+        chunks=self.chunker.chunk_text(raw_text)
+        #提取表格
         tables=self._extract_tables(doc)
         return ParseResult(
                     file_name=file_name,
                     total_pages=len(doc.document.pages),
-                    total_chunks=len(raw_text),
+                    total_chunks=len(chunks),
                     table_count=len(tables),
-                    chunks=[],
+                    chunks=chunks,
                     raw_text=raw_text,
                     tables=tables,
                     metadata={

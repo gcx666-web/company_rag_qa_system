@@ -46,47 +46,52 @@ class HtmlParser(BaseParser):
         '''
         #使用docling 解析文档
         doc=self.converter.convert(file_path)
-        
+
         #提取内容
         raw_text=doc.document.export_to_markdown()
-        
+        #分块
+        chunks=self.chunker.chunk_text(raw_text)
+
         #提取表格
         tables=self._extract_tables(doc)
-        
+
         return ParseResult(
             file_name=Path(file_path).name,
             total_pages=len(doc.document.pages),
-            total_chunks=len(raw_text),
+            total_chunks=len(chunks),
             table_count=len(tables),
-            chunks=[],
+            chunks=chunks,
             raw_text=raw_text,
             tables=tables,
             metadata={
                 'parser':'docling','file_path':file_path
             }
         )
-            
 
-        
-    
+
+
+
     def parse_from_bytes(self, file_bytes: bytes, file_name: str) -> ParseResult:
         # 从字节流解析HTML
-        
+
         #使用docling 转换成document对象
         bio = BytesIO(file_bytes)
         source = DocumentStream(name=file_name, stream=bio)
         doc = self.converter.convert(source)
         #提取内容
         raw_text=doc.document.export_to_markdown()
-                
+
+        #分块
+        chunks=self.chunker.chunk_text(raw_text)
+
          #提取表格
         tables=self._extract_tables(doc)
         return ParseResult(
                     file_name=file_name,
                     total_pages=len(doc.document.pages),
-                    total_chunks=len(raw_text),
+                    total_chunks=len(chunks),
                     table_count=len(tables),
-                    chunks=[],
+                    chunks=chunks,
                     raw_text=raw_text,
                     tables=tables,
                     metadata={
