@@ -1,0 +1,31 @@
+[project]
+name = "company-rag-qa-system"
+version = "0.1.0"
+description = "Add your description here"
+readme = "README.md"
+authors = [
+    { name = "agent_gentlemen", email = "3012209134@qq.com" }
+]
+requires-python = ">=3.13"
+dependencies = [
+    "docling>=2.144.0",
+    "fastapi>=0.162.0",
+    "pandas",
+    "pandas-stubs",
+    "python-multipart>=0.0.33",
+    "uvicorn>=0.54.0",
+]
+
+[project.scripts]
+company-rag-qa-system = "company_rag_qa_system:main"
+
+[build-system]
+requires = ["uv_build>=0.12.13,<0.13.0"]
+build-backend = "uv_build"
+
+# 应用型项目：代码在 src/parsers 等目录下平铺，没有名为 company_rag_qa_system
+# 的包，uv_build 无法构建项目本身（否则 uv add / uv sync 会报
+# “Expected a Python module at: src\company_rag_qa_system\__init__.py”）。
+# 设为虚拟项目后，uv 只安装第三方依赖，不再尝试把本项目打包进 venv。
+[tool.uv]
+package = false

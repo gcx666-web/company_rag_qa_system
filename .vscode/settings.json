@@ -1,0 +1,17 @@
+{
+    // Python 解释器：固定用项目自带的 .venv（docling、pandas 等依赖都装在这里）。
+    // 注意：若之前手动选过别的解释器，需 Ctrl+Shift+P →
+    // “Python: Select Interpreter” 手动切换到 .venv\Scripts\python.exe。
+    "python.defaultInterpreterPath": "${workspaceFolder}/.venv/Scripts/python.exe",
+
+    // 把项目根目录作为导入搜索路径，Pylance 才能解析
+    // from src.parsers.cleaner import TextClearn 这种以 src. 开头的导入
+    "python.analysis.extraPaths": ["${workspaceFolder}"],
+
+    // 测试面板：tests/ 下的用例用标准库 unittest 编写（项目 venv 暂无 pytest）
+    "python.testing.unittestEnabled": true,
+    "python.testing.pytestEnabled": false,
+
+    // 建议以 UTF-8 读写文件，避免中文注释乱码
+    "files.encoding": "utf8"
+}
