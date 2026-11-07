@@ -21,6 +21,11 @@ async def upload_file(file: UploadFile = File(...)):
     contents = await file.read()
     if len(contents) > settings.MAX_FILE_SIZE:
         raise ValueError("文件大小超过限制")
+    #保存文件
+    _ensure_upload_dir_exists()
+    file_path = os.path.join(settings.UPLOAD_DIR, file.filename)
+    with open(file_path, "wb") as f:
+        f.write(contents)
     try:
         #获取解析器
         parser = ParserFactory.get_parser(file.filename)
@@ -84,4 +89,12 @@ async def parse_document_by_path(body:ParsePathRequest):
             "message":"文件处理失败",
             "error":str(e)
         }
+@router.post("/support-types", summary="支持类型")
+async def get_support_file_types():
+    """
+    获取支持的文件类型
+    """
+    return {
+        "support_file_types": ParserFactory.support_file_types()
+    }
     

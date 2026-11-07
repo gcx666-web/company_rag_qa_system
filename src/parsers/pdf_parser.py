@@ -49,11 +49,15 @@ class PdfParser(BaseParser):
         
         #提取内容
         raw_text=doc.document.export_to_markdown()
-        #分块
-        chunks=self.chunker.chunk_text(raw_text)
-        
         #提取表格
         tables=self._extract_tables(doc)
+        #清洗文本
+        raw_text=self.cleaner.clearn(raw_text)
+        #合并表格
+        tables=self.table_processor.merge_tables(tables)
+        #分块（文本块+表格块，file_name 用文件名而非完整路径，保证与 file_name 字段一致）
+        chunks=self.chunker.chunk(raw_text,tables,Path(file_path).name)
+        
         
         return ParseResult(
             file_name=Path(file_path).name,
@@ -80,10 +84,14 @@ class PdfParser(BaseParser):
         doc = self.converter.convert(source)
         #提取内容
         raw_text=doc.document.export_to_markdown()
-        #分块
-        chunks=self.chunker.chunk_text(raw_text)
         #提取表格
         tables=self._extract_tables(doc)
+        #清洗文本（注意方法名是 clearn，不是 clean_text）
+        raw_text=self.cleaner.clearn(raw_text)
+        #合并表格
+        tables=self.table_processor.merge_tables(tables)
+        #分块（文本块+表格块，file_name 由调用方传入）
+        chunks=self.chunker.chunk(raw_text,tables,file_name)
         return ParseResult(
                     file_name=file_name,
                     total_pages=len(doc.document.pages),
@@ -135,10 +143,14 @@ class PdfParser(BaseParser):
                 # 表格文本要用 export_to_markdown 导出；传 doc 参数避免弃用警告
                 table_text = str(table.export_to_markdown(doc=document) or '')
 
-                # 结构化行列数据用 export_to_dataframe 导出。注意：docling 导出的
-                # DataFrame 列名是数字索引，表头行包含在数据行里，直接取全部数据行
+                # 结构化行列数据用 export_to_dataframe 导出。注意：docling（docling_core 2.x）
+                # 会把表格首行（表头）放进 DataFrame 的列名，df.values 里只剩数据行；
+                # 而 rows[0] 必须是表头（chunker / merge_tables 的约定），所以要把表头补回首行。
+                # 未识别出表头时列名是 0/1/2… 的整数索引，此时不补，避免多出一行数字假表头。
                 df = table.export_to_dataframe(doc=document)
                 table_rows = [[str(v) for v in row] for row in df.values.tolist()]
+                if table_rows and not all(isinstance(c, int) for c in df.columns):
+                    table_rows.insert(0, [str(c) for c in df.columns])
 
                 # 表格所在页码：从 provenance（溯源信息）里取，取不到则给 None
                 prov = getattr(table, 'prov', None) or []
