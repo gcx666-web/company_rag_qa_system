@@ -13,5 +13,6 @@
     "python.testing.pytestEnabled": false,
 
     // 建议以 UTF-8 读写文件，避免中文注释乱码
-    "files.encoding": "utf8"
+    "files.encoding": "utf8",
+    "QoderCN.cloudModelEnable": true
 }
