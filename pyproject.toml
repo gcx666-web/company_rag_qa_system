@@ -17,6 +17,7 @@ dependencies = [
     "openai>=3.46.0",
     "pandas",
     "pandas-stubs",
+    "python-dotenv>=1.2.4",
     "python-multipart>=0.0.33",
     "sentence-transformers>=6.2.0",
     "tenacity>=9.2.1",

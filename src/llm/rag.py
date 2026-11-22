@@ -64,16 +64,26 @@ def generate_answer(llm:LLM,question: str, result:List[Dict[str,Any]],temperatur
     Args:
         llm (LLM): LLM模型
         question (str): 问题
-        result (List[Dict[str,Any]]): 搜索结果
+        result (List[Dict[str,Any]]): 搜索结果, 格式为[{"id": "xxx", "content": "xxx"}, ...]
         _description_
 
     Returns:
         Dict[str,Any]: _description_
+        {
+        "answer": response.get('content','').strip(),
+        "question": question,
+        "context": context,
+        "tokens_used": response.get('token_usage',{}),
+        "model": llm.model,
+    }
     """
     if not result:
         return {
             "answer": "没有找到答案",
             "question": question,
+            "context": "",
+            "tokens_used": {},
+            "model": llm.model,
         }
     
     #格式化上下文

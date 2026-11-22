@@ -2,7 +2,7 @@ from math import e
 from typing import Any, Dict, List
 from dataclasses import dataclass
 
-from sympy import im
+
 from src.database.document_store import DocumentStore
 import time
 @dataclass
@@ -34,6 +34,18 @@ class SearchResponse:
 class SearchService:
     """
     检索服务
+    参数：
+     document_store: 文档存储
+     命名空间
+     元数据过滤条件
+     top_k: 返回数量
+     返回：SearchResponse(
+            query=query,
+            total=len(results),
+            results=results,
+            time=total_time,
+        )
+     
     """
     def __init__(self, document_store: DocumentStore):
         self.document_store = document_store
@@ -55,3 +67,4 @@ class SearchService:
             results=results,
             time=total_time,
         )
+        

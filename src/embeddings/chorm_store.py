@@ -220,6 +220,41 @@ class ChromaVectorStore(BaseVectorStore):
             return
         self.collection.delete(ids=[str(document_id)])
 
+    def delete_by_file_name(
+        self, file_name: str, namespace: Optional[str] = None
+    ) -> int:
+        """
+        按文件名删除分块，返回删除条数。
+
+        Chroma 的 delete 只接受 id 列表，因此先用 metadata 过滤查出命中记录
+        （include 只要 metadatas，不额外拉取文档与向量），再按 namespace
+        在客户端过滤后批量删除；namespace 为 None 时删除所有命名空间下的同文件分块。
+
+        :param file_name: 文件名（与写入时 metadata.file_name 一致）。
+        :param namespace: 命名空间过滤；None 表示不限制。
+        :return:          实际删除的分块条数。
+        """
+        if not file_name or not str(file_name).strip():
+            logger.warning("delete_by_file_name 收到空文件名，已跳过")
+            return 0
+
+        result = self.collection.get(
+            where={"file_name": str(file_name)}, include=["metadatas"]
+        )
+        ids = list(result.get("ids") or [])
+        if namespace is not None:
+            metadatas = result.get("metadatas") or []
+            ids = [
+                doc_id
+                for index, doc_id in enumerate(ids)
+                if index < len(metadatas)
+                and (metadatas[index] or {}).get("namespace") == namespace
+            ]
+        if not ids:
+            return 0
+        self.collection.delete(ids=ids)
+        return len(ids)
+
     def clear(self) -> bool:
         """
         清空向量存储：删除集合并按当前配置重建。

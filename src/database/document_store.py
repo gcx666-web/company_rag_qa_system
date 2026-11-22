@@ -80,6 +80,7 @@ class DocumentStore:
         self,
         parse_result: ParseResult,
         namespace: str = "default",
+        overwrite: bool = False,
     ) -> List[str]:
         """
         添加解析结果到向量库。
@@ -96,6 +97,9 @@ class DocumentStore:
 
         :param parse_result: 文档解析结果。
         :param namespace:    命名空间（用于区分不同文档集）。
+        :param overwrite:    是否覆盖导入。为 True 时先按 namespace + file_name
+                             删除旧分块再写入新分块，使重复上传同一个文件等价于
+                             “用新内容替换旧内容”，而不是抛 DuplicateIDError。
         :return:             文档 id 列表；没有可写入内容时返回空列表。
         :raises DuplicateIDError: 写入前检测到 id 已存在时抛出（由本服务显式检查）。
         """
@@ -147,6 +151,18 @@ class DocumentStore:
                 "解析结果中所有分块都无效（file_name=%r），没有写入任何记录", file_name
             )
             return []
+
+        # 覆盖导入（方案 A）：先按 namespace + file_name 删除旧分块，
+        # 再写入新分块，让“重新上传同一个文件”等价于用新内容替换旧内容
+        if overwrite and file_name:
+            removed = self.delete_by_file_name(file_name, namespace=namespace)
+            if removed:
+                logger.info(
+                    "覆盖导入：已删除旧分块 %d 条（namespace=%s, file_name=%s）",
+                    removed,
+                    namespace,
+                    file_name,
+                )
 
         # Chroma 对已存在 id 的写入是静默忽略，写入前先拦截，避免“看起来成功但没更新”
         self._ensure_ids_absent([document.id for document in documents])
@@ -310,8 +326,17 @@ class DocumentStore:
         :param query:     查询文本；空白查询直接返回空列表。
         :param top_k:     返回结果数；非正数直接返回空列表。
         :param namespace: 命名空间过滤；None 表示不限制。
-        :return:          结果字典列表（按相似度降序）：
-                          {"id", "content", "score", "distance", "metadata"}。
+        :return [
+            {
+                "id": r.document.id,
+                "content": r.document.content,
+                "score": r.score,
+                # Chroma 的原始 distance 保留下来，便于调用方自定义相似度阈值
+                "distance": (r.metadata or {}).get("distance"),
+                "metadata": r.document.metadata,
+            }
+            for r in results
+        ]
         """
         if top_k <= 0:
             return []
@@ -401,6 +426,28 @@ class DocumentStore:
         :param document_id: 文档 id；为空或不存在时由底层静默跳过。
         """
         self.vector_store.delete_document(document_id)
+
+    def delete_by_file_name(
+        self, file_name: str, namespace: Optional[str] = None
+    ) -> int:
+        """
+        按文件名删除该文件的所有分块（覆盖导入前的清理入口）。
+
+        上游向量库实现如果提供 delete_by_file_name 则直接转发；
+        没有该能力时打 warning 并返回 0，不影响主流程。
+
+        :param file_name: 文件名（与 ParseResult.file_name 一致）。
+        :param namespace: 命名空间过滤；None 表示不限制。
+        :return:          实际删除的分块条数。
+        """
+        if not file_name or not str(file_name).strip():
+            logger.warning("delete_by_file_name 收到空文件名，已跳过")
+            return 0
+        deleter = getattr(self.vector_store, "delete_by_file_name", None)
+        if deleter is None:
+            logger.warning("当前向量库不支持按文件名删除，跳过覆盖清理")
+            return 0
+        return deleter(file_name, namespace=namespace)
 
     def clear(self) -> bool:
         """

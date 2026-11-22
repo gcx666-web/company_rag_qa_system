@@ -1,7 +1,7 @@
 """API 请求/响应模型。"""
 
-from gc import collect
-from typing import Any
+
+from typing import Any,List,Dict
 
 from pydantic import BaseModel, Field
 
@@ -33,11 +33,20 @@ class ChatResponse(BaseModel):
     说明：
     tokens_used 直接来自 openai 的 CompletionUsage 对象（不是 dict），
     因此声明为 Any，保证正常分支与空结果分支都能直接构造并序列化。
+    属性：
+    answer: str = Field(..., description="答案")
+    question: str = Field(..., description="问题")
+    context: str = Field(default="", description="拼装后的上下文")
+    tokens_used: Any = Field(default_factory=dict, description="本次调用的大模型 token 用量")
+    sources:List[Dict[str,Any]] = Field(default_factory=list, description="来源")
+    total_time_ms: float = Field(default=0.0, description="总耗时")
+
+    
     """
 
     answer: str = Field(..., description="答案")
     question: str = Field(..., description="问题")
     context: str = Field(default="", description="拼装后的上下文")
     tokens_used: Any = Field(default_factory=dict, description="本次调用的大模型 token 用量")
-    model: str = Field(default="", description="回答所用模型")
-
+    sources:List[Dict[str,Any]] = Field(default_factory=list, description="来源")
+    total_time_ms: float = Field(default=0.0, description="总耗时")

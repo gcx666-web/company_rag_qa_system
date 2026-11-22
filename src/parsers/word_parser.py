@@ -1,8 +1,8 @@
 import logging
 from typing import Any, Dict, List, Optional
 
-from docling.document_converter import DocumentConverter
-from docling.datamodel.base_models import DocumentStream
+from docling.document_converter import DocumentConverter, WordFormatOption
+from docling.datamodel.base_models import DocumentStream, InputFormat
 from docling.datamodel.pipeline_options import PdfPipelineOptions
 from io import BytesIO
 from pathlib import Path
@@ -32,12 +32,15 @@ class WordParser(BaseParser):
             table_processor if table_processor else TableProcessor()
         )
 
-        # 初始化Docling 转换器选项
+        # 初始化Docling 转换器选项（选项必须通过 format_options 传给转换器才会生效）
         pipeline_options = PdfPipelineOptions()
         pipeline_options.do_ocr = True
         pipeline_options.do_table_structure = True
 
-        self.converter = DocumentConverter()
+        self.converter = DocumentConverter(
+            format_options={InputFormat.DOCX: WordFormatOption(pipeline_options=pipeline_options)}
+        )
+
     def support_file_types(self) -> list:
         #docling 只支持 .docx，不支持老版二进制 .doc 格式
         return ['.docx','.DOCX']
