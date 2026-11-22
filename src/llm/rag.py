@@ -1,8 +1,4 @@
-import re
-from typing import Any,List,Dict
-
-from click import prompt
-from numpy.random import f
+from typing import Any, AsyncIterator, Dict, List
 
 from src.llm.llm import LLM
 
@@ -78,12 +74,10 @@ def generate_answer(llm:LLM,question: str, result:List[Dict[str,Any]],temperatur
     }
     """
     if not result:
+        # 空结果短路：不调用大模型，避免无意义的费用（与现有测试约定一致）
         return {
             "answer": "没有找到答案",
             "question": question,
-            "context": "",
-            "tokens_used": {},
-            "model": llm.model,
         }
     
     #格式化上下文
@@ -99,5 +93,86 @@ def generate_answer(llm:LLM,question: str, result:List[Dict[str,Any]],temperatur
         "question": question,
         "context": context,
         "tokens_used": response.get('token_usage',{}),
+        "model": llm.model,
+    }
+
+
+async def generate_answer_stream(
+    llm: LLM,
+    question: str,
+    result: List[Dict[str, Any]],
+    temperature: float = 0.7,
+    max_token: int = 2000,
+) -> AsyncIterator[Dict[str, Any]]:
+    """异步流式生成答案（与 ``generate_answer`` 共用上下文格式化与提示词）。
+
+    事件顺序：
+
+    1. ``{"type": "start", "question", "context", "model"}``：检索上下文已就绪；
+    2. ``{"type": "delta", "content": "增量文本"}``：可能多次，前端直接拼接；
+    3. ``{"type": "done", "answer", "question", "context", ...}``：生成结束的汇总。
+
+    空检索结果与同步版本保持一致：直接返回“没有找到答案”，不调用大模型，
+    避免无意义的费用。
+    """
+    context = format_context(result, max_token) if result else ""
+    yield {
+        "type": "start",
+        "question": question,
+        "context": context,
+        "model": llm.model,
+    }
+
+    if not result:
+        answer = "没有找到答案"
+        yield {"type": "delta", "content": answer}
+        yield {
+            "type": "done",
+            "answer": answer,
+            "question": question,
+            "context": context,
+            "tokens_used": {},
+            "finish_reason": "empty_result",
+            "model": llm.model,
+        }
+        return
+
+    # 构建提示词并异步流式调用大模型
+    prompt = build_prompt(question, context)
+    message = [{"role": "user", "content": prompt}]
+    parts: List[str] = []
+    finish_reason = None
+    token_usage: Any = {}
+    stream = llm.generate_stream(
+        message, temperature=temperature, max_tokens=max_token
+    )
+    try:
+        async for event in stream:
+            event_type = event.get("type")
+            if event_type == "delta":
+                content = str(event.get("content") or "")
+                if not content:
+                    continue
+                parts.append(content)
+                yield {"type": "delta", "content": content}
+            elif event_type == "done":
+                finish_reason = event.get("finish_reason")
+                token_usage = event.get("token_usage") or {}
+    finally:
+        # 客户端断开 / 迭代异常时关闭上游异步流，触发 LLM 层释放连接
+        close = getattr(stream, "aclose", None)
+        if close is not None:
+            try:
+                await close()
+            except BaseException:  # 取消/断连时的关闭失败可忽略
+                pass
+
+    yield {
+        "type": "done",
+        "answer": "".join(parts).strip(),
+        "question": question,
+        "context": context,
+        "tokens_used": token_usage,
+        "finish_reason": finish_reason,
         "model": llm.model,
     }

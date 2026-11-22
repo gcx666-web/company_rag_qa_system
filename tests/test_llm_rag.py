@@ -48,7 +48,12 @@ import openai
 from dotenv import load_dotenv
 
 from src.llm.llm import LLM
-from src.llm.rag import build_prompt, format_context, generate_answer
+from src.llm.rag import (
+    build_prompt,
+    format_context,
+    generate_answer,
+    generate_answer_stream,
+)
 
 # 各供应商的默认配置
 SILICONFLOW_BASE_URL = "https://api.siliconflow.cn/v1"
@@ -530,7 +535,340 @@ class TestGenerateAnswerUnit(unittest.TestCase):
 
 
 # ======================================================================
-# 六、真实模型集成测试：真实请求 .env 配置的大模型
+# 六、异步流式生成：LLM.generate_stream（mock，不联网）
+# ======================================================================
+class FakeDelta:
+    """模拟流式 chunk 里的 delta 对象。"""
+
+    def __init__(self, content):
+        self.content = content
+
+
+class FakeChoice:
+    """模拟流式 chunk 里的 choice 对象。"""
+
+    def __init__(self, content=None, finish_reason=None):
+        self.delta = FakeDelta(content)
+        self.finish_reason = finish_reason
+
+
+class FakeChunk:
+    """模拟 chat.completions.create(stream=True) 返回的单个 chunk。"""
+
+    def __init__(self, content=None, finish_reason=None, usage=None):
+        self.choices = [FakeChoice(content, finish_reason)]
+        self.usage = usage
+
+
+class FakeAsyncStream:
+    """可异步迭代的假流对象，记录是否被 close。"""
+
+    def __init__(self, chunks):
+        self._chunks = list(chunks)
+        self.closed = False
+
+    def __aiter__(self):
+        return self
+
+    async def __anext__(self):
+        if not self._chunks:
+            raise StopAsyncIteration
+        return self._chunks.pop(0)
+
+    async def close(self):
+        self.closed = True
+
+
+class ExplodingAsyncStream:
+    """产出第一块后抛异常的假流，用于验证 finally 中关闭上游连接。"""
+
+    def __init__(self):
+        self.closed = False
+        self._sent = False
+
+    def __aiter__(self):
+        return self
+
+    async def __anext__(self):
+        if not self._sent:
+            self._sent = True
+            return FakeChunk(content="前半段")
+        raise RuntimeError("模拟流式接口中断")
+
+    async def close(self):
+        self.closed = True
+
+
+class FakeBadRequestError(Exception):
+    """替身异常：让 generate_stream 走“去掉 stream_options 重试”的分支。"""
+
+
+def make_fake_async_client(create):
+    """构造一个只有 chat.completions.create 的假异步客户端。"""
+    client = mock.Mock()
+    client.chat.completions.create = create
+    return client
+
+
+class TestLLMGenerateStream(unittest.IsolatedAsyncioTestCase):
+    """异步流式：参数透传、事件顺序、用量捕获、连接关闭与兜底重试。"""
+
+    def make_llm(self, timeout=None):
+        with mock.patch("src.llm.llm.openai.OpenAI"):
+            return LLM(
+                api_key="sk-test",
+                model="test-model",
+                base_url="https://example.com/v1",
+                timeout=timeout,
+            )
+
+    async def collect(self, llm, messages, **kwargs):
+        return [event async for event in llm.generate_stream(messages, **kwargs)]
+
+    async def test_增量事件与结束事件(self):
+        llm = self.make_llm()
+        usage = FakeUsage(prompt_tokens=4, completion_tokens=6)
+        stream = FakeAsyncStream(
+            [
+                FakeChunk(content="你好"),
+                FakeChunk(content="，世界"),
+                FakeChunk(content="", finish_reason="stop", usage=usage),
+            ]
+        )
+        calls = []
+
+        async def create(**kwargs):
+            calls.append(kwargs)
+            return stream
+
+        async_client = make_fake_async_client(create)
+        messages = [{"role": "user", "content": "打个招呼"}]
+        with mock.patch(
+            "src.llm.llm.openai.AsyncOpenAI", return_value=async_client
+        ):
+            events = await self.collect(
+                llm, messages, temperature=0.1, max_tokens=64
+            )
+
+        self.assertEqual(
+            events,
+            [
+                {"type": "delta", "content": "你好"},
+                {"type": "delta", "content": "，世界"},
+                {
+                    "type": "done",
+                    "content": "你好，世界",
+                    "finish_reason": "stop",
+                    "token_usage": usage,
+                },
+            ],
+        )
+        self.assertTrue(stream.closed, "流结束后必须关闭上游连接")
+
+        kwargs = calls[0]
+        self.assertEqual(kwargs["model"], "test-model")
+        self.assertEqual(kwargs["messages"], messages)
+        self.assertIs(kwargs["stream"], True)
+        self.assertEqual(kwargs["temperature"], 0.1)
+        self.assertEqual(kwargs["max_tokens"], 64)
+        # 第一次尝试带 stream_options 以获取 token 用量
+        self.assertEqual(kwargs["stream_options"], {"include_usage": True})
+
+    async def test_异步客户端延迟创建且复用(self):
+        llm = self.make_llm(timeout=30)
+        stream = FakeAsyncStream([FakeChunk(content="ok", finish_reason="stop")])
+
+        async def create(**kwargs):
+            return stream
+
+        async_client = make_fake_async_client(create)
+        with mock.patch(
+            "src.llm.llm.openai.AsyncOpenAI", return_value=async_client
+        ) as fake_async:
+            # 未调用流式接口前不应创建异步客户端
+            self.assertFalse(fake_async.called)
+            await self.collect(llm, [{"role": "user", "content": "hi"}])
+            await self.collect(llm, [{"role": "user", "content": "hi"}])
+
+        # 只创建一次，之后的流式调用复用同一个客户端
+        fake_async.assert_called_once_with(
+            api_key="sk-test",
+            base_url="https://example.com/v1",
+            timeout=30,
+        )
+
+    async def test_空增量被过滤(self):
+        llm = self.make_llm()
+        stream = FakeAsyncStream(
+            [FakeChunk(content=None), FakeChunk(content=""), FakeChunk(content="答案")]
+        )
+
+        async def create(**kwargs):
+            return stream
+
+        async_client = make_fake_async_client(create)
+        with mock.patch("src.llm.llm.openai.AsyncOpenAI", return_value=async_client):
+            events = await self.collect(llm, [{"role": "user", "content": "hi"}])
+
+        self.assertEqual(events[0], {"type": "delta", "content": "答案"})
+        self.assertEqual(events[-1]["content"], "答案")
+        self.assertEqual(len(events), 2)
+
+
+    async def test_供应商不支持stream_options时自动重试(self):
+        llm = self.make_llm()
+        usage = FakeUsage()
+        stream = FakeAsyncStream(
+            [FakeChunk(content="重试成功", finish_reason="stop", usage=usage)]
+        )
+        calls = []
+
+        async def create(**kwargs):
+            calls.append(kwargs)
+            if len(calls) == 1:
+                raise FakeBadRequestError("stream_options 不被支持")
+            return stream
+
+        async_client = make_fake_async_client(create)
+        messages = [{"role": "user", "content": "hi"}]
+        with mock.patch(
+            "src.llm.llm.openai.BadRequestError", FakeBadRequestError
+        ), mock.patch(
+            "src.llm.llm.openai.AsyncOpenAI", return_value=async_client
+        ):
+            events = await self.collect(llm, messages)
+
+        self.assertEqual(len(calls), 2)
+        self.assertIn("stream_options", calls[0])
+        # 重试时去掉 stream_options，其余参数保持不变
+        self.assertNotIn("stream_options", calls[1])
+        self.assertEqual(calls[1]["model"], "test-model")
+        self.assertEqual(events[-1]["content"], "重试成功")
+        self.assertIs(events[-1]["token_usage"], usage)
+
+    async def test_流中异常会关闭连接并向上抛出(self):
+        llm = self.make_llm()
+        stream = ExplodingAsyncStream()
+
+        async def create(**kwargs):
+            return stream
+
+        async_client = make_fake_async_client(create)
+        with mock.patch("src.llm.llm.openai.AsyncOpenAI", return_value=async_client):
+            seen = []
+            with self.assertRaises(RuntimeError):
+                async for event in llm.generate_stream(
+                    [{"role": "user", "content": "hi"}]
+                ):
+                    seen.append(event)
+
+        self.assertEqual(seen, [{"type": "delta", "content": "前半段"}])
+        self.assertTrue(stream.closed, "异常退出时也必须关闭上游连接")
+
+
+# ======================================================================
+# 七、异步流式问答：generate_answer_stream（假 LLM，无网络）
+# ======================================================================
+class StubStreamLLM:
+    """假流式 LLM：记录调用参数并逐块产出内容。"""
+
+    def __init__(self, chunks=("公司", "年假15天。"), usage=None, finish_reason="stop"):
+        self.model = "stub-stream-model"
+        self.chunks = list(chunks)
+        self.usage = {} if usage is None else usage
+        self.finish_reason = finish_reason
+        self.calls = []
+
+    async def generate_stream(self, message, temperature=0.7, max_tokens=2000):
+        self.calls.append(
+            {
+                "message": message,
+                "temperature": temperature,
+                "max_tokens": max_tokens,
+            }
+        )
+        for chunk in self.chunks:
+            yield {"type": "delta", "content": chunk}
+        yield {
+            "type": "done",
+            "content": "".join(self.chunks),
+            "finish_reason": self.finish_reason,
+            "token_usage": self.usage,
+        }
+
+
+class TestGenerateAnswerStream(unittest.IsolatedAsyncioTestCase):
+    """逐块事件、提示词拼装、空结果短路与用量透传。"""
+
+    async def test_正常路径逐块产出(self):
+        usage = {"total_tokens": 12}
+        stub = StubStreamLLM(usage=usage)
+        result = [{"content": "公司员工年假为15天"}]
+
+        events = [
+            event
+            async for event in generate_answer_stream(
+                stub, "公司年假多少天？", result, temperature=0.2, max_token=500
+            )
+        ]
+
+        self.assertEqual(events[0]["type"], "start")
+        self.assertEqual(events[0]["question"], "公司年假多少天？")
+        self.assertEqual(events[0]["context"], "公司员工年假为15天")
+        self.assertEqual(events[0]["model"], "stub-stream-model")
+
+        deltas = [event["content"] for event in events if event["type"] == "delta"]
+        self.assertEqual(deltas, ["公司", "年假15天。"])
+
+        done = events[-1]
+        self.assertEqual(done["type"], "done")
+        self.assertEqual(done["answer"], "公司年假15天。")
+        self.assertEqual(done["finish_reason"], "stop")
+        self.assertIs(done["tokens_used"], usage)
+        self.assertEqual(done["context"], "公司员工年假为15天")
+
+        call = stub.calls[0]
+        self.assertEqual(call["temperature"], 0.2)
+        self.assertEqual(call["max_tokens"], 500)
+        prompt = call["message"][0]["content"]
+        self.assertIn("公司年假多少天？", prompt)
+        self.assertIn("公司员工年假为15天", prompt)
+
+    async def test_空结果短路不调用模型(self):
+        stub = StubStreamLLM()
+
+        events = [
+            event
+            async for event in generate_answer_stream(stub, "公司年假多少天？", [])
+        ]
+
+        self.assertEqual(events[0]["type"], "start")
+        self.assertEqual(events[0]["context"], "")
+        self.assertEqual(
+            [event.get("content") for event in events if event["type"] == "delta"],
+            ["没有找到答案"],
+        )
+        done = events[-1]
+        self.assertEqual(done["type"], "done")
+        self.assertEqual(done["answer"], "没有找到答案")
+        self.assertEqual(done["finish_reason"], "empty_result")
+        self.assertEqual(done["tokens_used"], {})
+        # 空结果不消耗模型额度
+        self.assertEqual(stub.calls, [])
+
+    async def test_完成事件答案会被strip(self):
+        stub = StubStreamLLM(chunks=("  15天 ",))
+        events = [
+            event
+            async for event in generate_answer_stream(
+                stub, "年假多少天？", [{"content": "年假15天"}]
+            )
+        ]
+        self.assertEqual(events[-1]["answer"], "15天")
+
+
+# ======================================================================
+# 八、真实模型集成测试：真实请求 .env 配置的大模型
 # ======================================================================
 class TestLLMRagWithRealModel(unittest.TestCase):
     """真实调用 LLM.generate 与 generate_answer，验证端到端链路。

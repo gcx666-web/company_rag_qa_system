@@ -1,7 +1,7 @@
 [project]
 name = "company-rag-qa-system"
-version = "0.1.0"
-description = "Add your description here"
+version = "0.2.0"
+description = "企业知识库 RAG 问答系统：FastAPI + Vue 3 + ChromaDB，支持向量缓存、离线模型、客户端复用与文件秒传"
 readme = "README.md"
 authors = [
     { name = "agent_gentlemen", email = "3012209134@qq.com" }

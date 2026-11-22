@@ -413,11 +413,47 @@ class DocumentStore:
         :return: ChromaVectorStore.get_collection_info() 的全部字段
                  （name / count / distance / persist_directory），
                  追加 embedding_model 与 embedding_dimension。
+                 如果向量模型带缓存包装器，还会附带 embedding_cache 统计。
         """
         stats = dict(self.vector_store.get_collection_info() or {})
         stats["embedding_model"] = self.embedding_model.get_model_name()
         stats["embedding_dimension"] = self.embedding_model.get_dimension()
+        # CachedEmbeddings 才有 cache_stats；直接传入的模型（如测试 FakeEmbedding）
+        # 没有该方法时跳过，保持向后兼容
+        cache_stats = getattr(self.embedding_model, "cache_stats", None)
+        if callable(cache_stats):
+            try:
+                stats["embedding_cache"] = cache_stats()
+            except Exception as exc:  # 缓存统计失败不应影响主接口
+                logger.warning("读取向量缓存统计失败：%s", exc)
         return stats
+
+    def has_file(self, file_name: str, namespace: Optional[str] = None) -> bool:
+        """
+        判断向量库中是否存在该文件的分块（秒传前的二次确认）。
+
+        :param file_name: 文件名。
+        :param namespace: 命名空间过滤；None 表示不限制。
+        """
+        checker = getattr(self.vector_store, "has_file", None)
+        if checker is None:
+            return False
+        try:
+            return bool(checker(file_name, namespace=namespace))
+        except Exception as exc:
+            logger.warning("查询文件是否存在失败：%s", exc)
+            return False
+
+    def list_files(self, namespace: Optional[str] = None) -> List[Dict[str, Any]]:
+        """
+        列出向量库中的文件及统计信息（知识库管理页面使用）。
+
+        :param namespace: 命名空间过滤；None 表示全部。
+        """
+        lister = getattr(self.vector_store, "list_files", None)
+        if lister is None:
+            return []
+        return lister(namespace=namespace)
 
     def delete_document(self, document_id: str) -> None:
         """

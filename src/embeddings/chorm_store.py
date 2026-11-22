@@ -49,6 +49,7 @@ class ChromaVectorStore(BaseVectorStore):
         collection_name: str = "rag_documents",
         persist_directory: str = "./data/chroma_db",  # 数据库保存路径
         distance: str = "cosine",
+        client: Optional[Any] = None,
     ):
         """
         构造函数。
@@ -56,6 +57,11 @@ class ChromaVectorStore(BaseVectorStore):
         :param collection_name:   集合名称。
         :param persist_directory: 本地持久化目录。
         :param distance:          相似度空间，仅支持 l2 / ip / cosine。
+        :param client:            可选的已有 Chroma 客户端。正式运行链路由
+                                  ``src.database.chroma_client.get_chroma_client``
+                                  传入复用实例，避免每个请求都重建客户端；
+                                  不传时保持旧行为（直接创建 PersistentClient），
+                                  方便单元测试 mock。
         :raises ValueError:       distance 不在白名单内时抛出。
         """
         if distance not in _SUPPORTED_SPACES:
@@ -67,8 +73,10 @@ class ChromaVectorStore(BaseVectorStore):
         # 注意：这里不能写成 distance,（尾部逗号会把字符串变成元组，
         # 导致 Chroma 报 "not a valid space: ('cosine',)"）
         self.distance = distance
-        # 创建Chroma客户端
-        self.client = chromadb.PersistentClient(path=self.persist_directory)
+        # 优先复用外部注入的客户端；没有注入时才自建（保持原调用链不变）
+        self.client = client or chromadb.PersistentClient(
+            path=self.persist_directory
+        )
         # 获取或创建集合
         self.collection = self._get_or_create_collection()
 
@@ -286,8 +294,141 @@ class ChromaVectorStore(BaseVectorStore):
             "persist_directory": self.persist_directory,
         }
 
+    def get_vector_dimension(self) -> Optional[int]:
+        """读取集合中实际存储的向量维度；空集合或读取失败时返回 None。
+
+        切换在线/离线向量模型后，旧集合的维度可能与当前模型不一致。知识库列表
+        接口用它提示用户“需要重新索引”，避免上传/问答时才发现 Chroma 报错。
+        """
+        try:
+            if self.collection.count() <= 0:
+                return None
+            data = self.collection.get(limit=1, include=["embeddings"])
+        except Exception as exc:
+            logger.warning("读取集合 %s 向量维度失败：%s", self.collection_name, exc)
+            return None
+
+        embeddings = data.get("embeddings")
+        if embeddings is None:
+            return None
+        # 不同 Chroma 版本可能返回 numpy 数组或嵌套列表
+        shape = getattr(embeddings, "shape", None)
+        if shape is not None and len(shape) == 2:
+            return int(shape[1])
+        if len(embeddings) == 0:
+            return None
+        first = embeddings[0]
+        try:
+            return len(first)
+        except TypeError:
+            return None
+
     # ==================================================================
-    # 四、内部工具
+    # 四、文件级查询（知识库管理 / 秒传校验）
+    # ==================================================================
+    def has_file(self, file_name: str, namespace: Optional[str] = None) -> bool:
+        """
+        判断向量库中是否存在指定文件的分块。
+
+        用途：上传登记表只记录“曾经成功导入过”，但用户可能已经手动删除了
+        向量库里的分块；秒传前必须再向向量库确认一次，避免登记表与真实数据
+        不一致时返回“重复上传成功”却查不到任何内容。
+
+        :param file_name: 文件名（与 metadata.file_name 一致）。
+        :param namespace: 命名空间过滤；None 表示不限制。
+        """
+        if not file_name or not str(file_name).strip():
+            return False
+        try:
+            result = self.collection.get(
+                where={"file_name": str(file_name)}, include=["metadatas"]
+            )
+        except Exception as exc:
+            logger.warning("按文件名查询向量库失败：%s", exc)
+            return False
+
+        ids = list(result.get("ids") or [])
+        if not ids:
+            return False
+        if namespace is None:
+            return True
+        metadatas = result.get("metadatas") or []
+        return any(
+            (metadata or {}).get("namespace") == namespace
+            for metadata in metadatas
+        )
+
+    def list_files(self, namespace: Optional[str] = None) -> List[Dict[str, Any]]:
+        """
+        列出向量库中的文件及其统计信息（按 namespace + file_name 聚合）。
+
+        返回值示例::
+
+            [{
+                "file_name": "员工手册.pdf",
+                "namespace": "hr",
+                "chunks": 42,
+                "tables": 3,
+                "pages": [1, 2, 5],
+                "total_chars": 18321,
+            }]
+
+        :param namespace: 只返回指定 namespace 的文件；None 表示全部。
+        """
+        try:
+            result = self.collection.get(include=["metadatas"])
+        except Exception as exc:
+            logger.warning("列出向量库文件失败：%s", exc)
+            return []
+
+        metadatas = result.get("metadatas") or []
+        files: Dict[tuple[str, str], Dict[str, Any]] = {}
+        for metadata in metadatas:
+            if not isinstance(metadata, dict):
+                continue
+            file_name = str(metadata.get("file_name") or "").strip()
+            if not file_name:
+                continue
+            item_namespace = str(metadata.get("namespace") or "")
+            if namespace is not None and item_namespace != namespace:
+                continue
+            key = (item_namespace, file_name)
+            item = files.get(key)
+            if item is None:
+                item = {
+                    "file_name": file_name,
+                    "namespace": item_namespace,
+                    "chunks": 0,
+                    "tables": 0,
+                    "pages": set(),
+                    "total_chars": 0,
+                }
+                files[key] = item
+
+            item["chunks"] += 1
+            if metadata.get("chunk_type") == "table":
+                item["tables"] += 1
+            page = metadata.get("page")
+            if page is not None:
+                try:
+                    item["pages"].add(int(page))
+                except (TypeError, ValueError):
+                    pass
+            char_count = metadata.get("char_count")
+            if isinstance(char_count, (int, float)):
+                item["total_chars"] += int(char_count)
+
+        # set 不能直接 JSON 序列化，转成排序后的列表
+        result_list = []
+        for item in files.values():
+            item["pages"] = sorted(item["pages"])
+            result_list.append(item)
+        return sorted(
+            result_list, key=lambda value: (value["namespace"], value["file_name"])
+        )
+
+    # ==================================================================
+    # 五、内部工具
     # ==================================================================
     @staticmethod
     def _normalize_id(raw_id: Any) -> str:
