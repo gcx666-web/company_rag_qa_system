@@ -1869,6 +1869,11 @@ code {
   font-size: 10.5px;
 }
 
+/* 集合读取失败（配置/向量库异常）时的小字提示 */
+.collection-copy small.collection-error {
+  color: var(--danger);
+}
+
 .collection-item.active .collection-copy strong {
   color: var(--brand-dark);
 }
@@ -1915,6 +1920,11 @@ code {
 .file-head {
   align-items: center;
   padding-bottom: 14px;
+}
+
+/* 集合统计不可用（读取失败）时，用危险色提示，避免误读成“空知识库” */
+.file-head .file-head-error {
+  color: var(--danger);
 }
 
 .file-table-wrap {

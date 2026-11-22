@@ -251,7 +251,10 @@ function statusLabel(file) {
               </span>
               <span class="collection-copy">
                 <strong>{{ item.name }}</strong>
-                <small>
+                <small v-if="item.error" class="collection-error" :title="item.error">
+                  读取失败 · 配置或向量库异常
+                </small>
+                <small v-else>
                   {{ item.count }} 分块 · {{ item.files }} 文件<template
                     v-if="item.embedding_dimension"
                   >
@@ -301,7 +304,10 @@ function statusLabel(file) {
         <header class="card-head file-head">
           <div>
             <h3>{{ selected || '文件列表' }}</h3>
-            <p v-if="selectedInfo">
+            <p v-if="selectedInfo && selectedInfo.error" class="file-head-error">
+              统计信息不可用 · 集合读取失败，原因见下方提示
+            </p>
+            <p v-else-if="selectedInfo">
               {{ selectedInfo.count }} 个分块 · {{ selectedInfo.files }} 个文件 ·
               距离 {{ selectedInfo.distance }}
             </p>
@@ -329,7 +335,20 @@ function statusLabel(file) {
           </div>
         </header>
 
-        <div v-if="selectedInfo && selectedInfo.compatible === false" class="inline-alert error compat-banner">
+        <div v-if="selectedInfo && selectedInfo.error" class="inline-alert error compat-banner">
+          <AppIcon name="alert" :size="18" />
+          <span>
+            知识库「{{ selectedInfo.name }}」读取失败：{{ selectedInfo.error }}
+            <template v-if="selectedInfo.model_dimension">
+              （当前向量模型输出 {{ selectedInfo.model_dimension }} 维）
+            </template>
+          </span>
+        </div>
+
+        <div
+          v-else-if="selectedInfo && selectedInfo.compatible === false"
+          class="inline-alert error compat-banner"
+        >
           <AppIcon name="alert" :size="18" />
           <span>
             该知识库使用 {{ selectedInfo.embedding_dimension }} 维向量，当前模型输出

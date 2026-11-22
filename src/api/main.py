@@ -57,8 +57,7 @@ async def lifespan(app: FastAPI):
 
     logger.info("RAG 服务启动：前端目录=%s", FRONTEND_DIST)
     logger.info(
-        "向量模式=%s（配置=%s），模型=%s，缓存=%s",
-        settings.EMBEDDING_MODE,
+        "向量模式=%s，模型=%s，缓存=%s",
         settings.EMBEDDING_MODE,
         settings.OFFLINE_EMBEDDING_MODEL
         if settings.EMBEDDING_MODE == "offline"

@@ -12,6 +12,7 @@ config.py —— 应用配置中心。
 4. 文件重复上传：上传登记表 + SHA-256 内容指纹，实现“秒传”和覆盖导入。
 """
 
+import logging
 import os
 from pathlib import Path
 
@@ -22,6 +23,8 @@ load_dotenv()
 
 # 项目根目录（src/api/config.py 往上两级）
 PROJECT_ROOT = Path(__file__).resolve().parents[2]
+
+logger = logging.getLogger(__name__)
 
 # 环境变量里常用的“真值”写法，统一转换成 bool
 _TRUE_VALUES = {"1", "true", "yes", "y", "on"}
@@ -65,6 +68,36 @@ def _env_list(name: str, default: list[str]) -> list[str]:
     return [item.strip() for item in str(raw).split(",") if item.strip()]
 
 
+def _env_choice(name: str, default: str, allowed: tuple[str, ...]) -> str:
+    """读取枚举型环境变量：剥掉行内注释、忽略大小写，非法值告警并回退默认值。
+
+    为什么需要单独处理注释：python-dotenv 只在 ``#`` 前有空白时才把它当行内注释，
+    所以 ``CHROMA_DISTANCE=cosine#向量相似度空间`` 会原样得到
+    ``cosine#向量相似度空间``。这个值会传给 Chroma 并被白名单校验拒绝，最终让
+    整个知识库接口 500。这里统一剥掉注释再做白名单校验，配置写错只会退化为
+    默认值并打 warning，而不是把服务打挂。
+
+    :param name:    环境变量名。
+    :param default: 未配置或非法时使用的默认值。
+    :param allowed: 合法取值白名单（小写）。
+    :return:        合法的配置值。
+    """
+    raw = os.getenv(name)
+    if raw is None or not str(raw).strip():
+        return default
+    value = str(raw).split("#", 1)[0].strip().lower()
+    if value in allowed:
+        return value
+    logger.warning(
+        "%s=%r 不是合法取值（只支持 %s），已回退为 %r",
+        name,
+        raw,
+        "/".join(allowed),
+        default,
+    )
+    return default
+
+
 class Settings:
     """API 配置类。
 
@@ -82,8 +115,8 @@ class Settings:
     UPLOAD_DIR = str(PROJECT_ROOT / 'data' / 'uploads')
     # 向量库持久化目录
     CHROMA_PERSIST_DIR = str(PROJECT_ROOT / 'data' / 'chroma_db')
-    # 向量相似度空间：cosine / l2 / ip
-    CHROMA_DISTANCE = os.getenv("CHROMA_DISTANCE", "cosine")
+    # 向量相似度空间：cosine / l2 / ip（非法值回退 cosine，见 _env_choice）
+    CHROMA_DISTANCE = _env_choice("CHROMA_DISTANCE", "cosine", ("l2", "ip", "cosine"))
 
     # ------------------------------------------------------------------
     # 向量模型（在线 / 离线 / 自动）
@@ -91,7 +124,9 @@ class Settings:
     # auto：有在线密钥且未强制离线时走在线接口，否则走本地离线模型
     # online：强制使用 OpenAI 兼容的向量接口（硅基流动、百炼、OpenAI 等）
     # offline：强制使用本地 SentenceTransformer 模型，全程不联网
-    EMBEDDING_MODE = (os.getenv("EMBEDDING_MODE") or "auto").strip().lower()
+    EMBEDDING_MODE = _env_choice(
+        "EMBEDDING_MODE", "auto", ("auto", "online", "offline")
+    )
     # 在线向量模型配置；密钥优先 EMBEDDING_API_KEY，回退 SILICONFLOW_API_KEY
     EMBEDDING_API_KEY = (
         os.getenv("EMBEDDING_API_KEY") or os.getenv("SILICONFLOW_API_KEY") or ""

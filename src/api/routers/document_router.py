@@ -35,6 +35,7 @@ from src.database.chroma_client import (
     delete_collection as drop_chroma_collection,
     list_collection_names,
 )
+from src.database.document_store import DocumentStore
 from src.database.upload_registry import get_upload_registry
 from src.embeddings.factory import describe_embedding
 
@@ -46,6 +47,27 @@ router = APIRouter(prefix="/document", tags=["知识库管理"])
 def _collection_exists(name: str) -> bool:
     """判断集合是否真实存在（避免“只读列表”顺手创建空集合）。"""
     return name in list_collection_names(settings.CHROMA_PERSIST_DIR)
+
+
+def _get_store(name: str) -> DocumentStore:
+    """构造（缓存的）文档存储；初始化失败时返回带原因的 503。
+
+    ``ChromaVectorStore`` 在构造阶段就要校验 distance 并打开集合，配置写错
+    （例如 ``CHROMA_DISTANCE`` 被行内注释污染）或向量库损坏时都会抛异常。
+    原实现让异常直接冒到 FastAPI，前端只能看到纯文本 ``Internal Server Error``，
+    用户完全不知道问题在哪；这里统一翻译成 503 + 中文原因，前端可原样展示。
+
+    :param name: 集合名称（同时作为写入/检索的 namespace）。
+    :raises HTTPException: 503，附带具体失败原因。
+    """
+    try:
+        return get_document_store(name)
+    except Exception as exc:
+        logger.exception("初始化知识库 %s 失败", name)
+        raise HTTPException(
+            status_code=503,
+            detail=f"知识库「{name}」初始化失败：{exc}",
+        ) from exc
 
 
 def _compatibility(
@@ -112,7 +134,7 @@ def list_collections() -> dict:
 def create_collection(body: CollectionCreateRequest) -> CollectionInfo:
     """创建（或获取）一个知识库集合。"""
     name = validate_collection_name(body.name)
-    store = get_document_store(name)
+    store = _get_store(name)
     info = store.vector_store.get_collection_info()
     embedding = describe_embedding()
     stored_dimension = store.vector_store.get_vector_dimension()
@@ -160,7 +182,7 @@ def list_files(
     if not _collection_exists(name):
         return {"collection_name": name, "files": []}
 
-    store = get_document_store(name)
+    store = _get_store(name)
     files = store.list_files(namespace=name)
     records = {
         record.file_name: record
@@ -195,7 +217,7 @@ def delete_file(
     """删除某个文件在集合中的全部分块，并清理登记记录。"""
     name = validate_collection_name(collection_name)
     safe_name = safe_filename(file_name)
-    store = get_document_store(name)
+    store = _get_store(name)
     removed = store.delete_by_file_name(safe_name, namespace=name)
     get_upload_registry().delete_by_name(name, safe_name)
     logger.info("删除文件分块：collection=%s, file=%s, removed=%d", name, safe_name, removed)
@@ -213,7 +235,7 @@ def collection_stats(
 ) -> dict:
     """返回集合的向量数、文件数、向量模型与缓存统计。"""
     name = validate_collection_name(collection_name)
-    store = get_document_store(name)
+    store = _get_store(name)
     stats = store.get_stats()
     stats["files"] = len(store.list_files(namespace=name))
     stats["registry_records"] = get_upload_registry().count(name)
